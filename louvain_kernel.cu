@@ -5,9 +5,12 @@
 #include <numeric>
 #include <cmath>
 
-#include <thrust/reduce.h>
-#include <thrust/device_ptr.h>
 #include <thrust/device_malloc_allocator.h>
+#include <thrust/device_ptr.h>
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#include <thrust/reduce.h>
+#include <thrust/sort.h>
 
 __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights, int *d_prefix_sums, int *d_degrees, int *d_community_idx, int *d_community_degrees, int *d_tmp_community_idx, int *d_tmp_community_degrees, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -160,6 +163,23 @@ __global__ void calculate_part_modularity(int n_tot, int m_tot, int *d_tmp_commu
     }
 }
 
+__global__ void compute_col_comms(int n, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_tmp_col_community) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(i < n) {
+        int start = 0;
+        if (i>0) {
+            start = d_prefix_sums[i-1];
+        }
+        int end = d_prefix_sums[i];
+
+        for (int j = start; j < end; j++) {
+            int col = d_col_idx[j];
+            d_tmp_col_community[j] = d_community_idx[col];
+        }
+    }
+}
+
 
 // -----------------------------------------------
 
@@ -194,6 +214,8 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     int *d_tmp_community_inter_sum;
     float *d_part_mod;
 
+    int *d_tmp_col_community;
+
     // allocate GPU memory  
     err = cudaMalloc((void **)&d_col_idx, m_edges*sizeof(int));
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_col_idx: %s\n", cudaGetErrorString( err ));
@@ -221,6 +243,9 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     err = cudaMalloc((void **)&d_part_mod, n*sizeof(float));
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_part_mod: %s\n", cudaGetErrorString( err ));
 
+    err = cudaMalloc((void **)&d_tmp_col_community, m_edges*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_col_community: %s\n", cudaGetErrorString( err ));
+
     // copy data to GPU
     err = cudaMemcpy(d_col_idx, col_idx, m_edges*sizeof(int), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device col_idx: %s\n", cudaGetErrorString( err ));
@@ -242,8 +267,22 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     err = cudaMemcpy(d_tmp_community_degrees, degrees, n*sizeof(int), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_tmp_community_degrees: %s\n", cudaGetErrorString( err ));
     
+    err = cudaMemset(d_tmp_col_community, 0, m_edges*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_tmp_col_community: %s\n", cudaGetErrorString( err ));
+    
     float phase_modularity = 0;
     while(true) {
+    
+        compute_col_comms<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_community_idx, d_tmp_col_community);
+
+        for(int i = 0; i < n; i++) {
+            int start = 0;
+            if (i>0) {
+                start = prefix_sums[i-1];
+            }
+            int end = prefix_sums[i];
+            thrust::sort(thrust::device, d_tmp_col_community + start, d_tmp_col_community + end);
+        }
     
         // 1. Calculate best moves
         move_nodes<<<grid, threads>>>(n, m_tot, d_col_idx, d_weights, d_prefix_sums, d_degrees, d_community_idx, d_community_degrees, d_tmp_community_idx, d_tmp_community_degrees, resolution);
