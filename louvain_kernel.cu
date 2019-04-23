@@ -10,9 +10,11 @@
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 #include <thrust/reduce.h>
+#include <thrust/remove.h>
+#include <thrust/scan.h>
 #include <thrust/sort.h>
 
-__global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights, int *d_prefix_sums, int *d_degrees, int *d_community_idx, int *d_community_degrees, int *d_tmp_community_idx, int *d_tmp_community_degrees, float resolution) {
+__global__ void move_nodes(int n_tot, int m_tot, int *d_neigh_col_idx, int *d_neigh_prefix_sums, int *d_neigh_weights, int *d_degrees, int *d_community_idx, int *d_community_degrees, int *d_tmp_community_idx, int *d_tmp_community_degrees, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
@@ -20,9 +22,9 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
         //define neighbour range
         int start = 0;
         if (i>0) {
-            start = d_prefix_sums[i-1];
+            start = d_neigh_prefix_sums[i-1];
         }
-        int end = d_prefix_sums[i];
+        int end = d_neigh_prefix_sums[i];
 
         int deg_i = d_degrees[i];
 
@@ -35,54 +37,17 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
         //iterate over neighbours of i 
         for(int j = start; j < end; j++) {
 
-            int col = d_col_idx[j];
-
-            //get community of neighbour
-            int col_comm = d_community_idx[col];
-
+            int col_comm = d_neigh_col_idx[j];
             int k_comm = d_community_degrees[col_comm];     //degree of community
 
             // The singlet minimum HEURISTIC
-            if(i == current_comm && deg_i == d_community_degrees[current_comm] && col == col_comm && d_degrees[col] == k_comm && col_comm > current_comm) {
-                #ifdef DEBUG_MODE
-                if(i == 0) {
-                    printf("$$$");
-                    printf("SKIP CHANGE %d to %d \n", i, col);
-                    printf("$$$");
-                }
-                #endif
-
+            if(i == current_comm && deg_i == d_community_degrees[current_comm] && col_comm > current_comm) {
                 continue;
             }
 
-            // int k_i_comm = col_weights[j];   //sum of weights of edges joining i with community
-            int k_i_comm = 0;   //sum of weights of edges joining i with community
-            //search for other neighbors from this community
-            for(int n = start; n < end; n++) {
-                int col_n = d_col_idx[n];
-                //check if its from the same community
-                if(d_community_idx[col_n] != col_comm) {
-                    continue;
-                }
-
-                // k_i_comm += d_weights[n];
-                k_i_comm++;
-            }
+            int k_i_comm = d_neigh_weights[j];
 
             local_q = (1.0 / (float)m_tot) * ((float)k_i_comm - (resolution * (float)deg_i * (float)k_comm / (2.0 * (float)m_tot)));
-
-            #ifdef DEBUG_MODE
-            if(i == 0) {
-                printf("=============== \n");
-                printf("migrate %d to %d \n", i, col_comm);
-                printf("m_tot = %d \n", m_tot);
-                // printf("comm_inter_deg = %d \n", comm_inter_deg);
-                printf("k_i_comm = %d \n", k_i_comm);
-                printf("deg_i = %d \n", deg_i);
-                printf("k_comm = %d \n", k_comm);
-                printf("local_q = %f \n", local_q);
-            }
-            #endif
 
             if(local_q >= max_q) {
                 if(local_q == max_q && new_comm < col_comm) {
@@ -163,7 +128,7 @@ __global__ void calculate_part_modularity(int n_tot, int m_tot, int *d_tmp_commu
     }
 }
 
-__global__ void compute_col_comms(int n, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_tmp_col_community) {
+__global__ void compute_col_comms(int n, int *d_col_idx, int *d_prefix_sums, int *d_weights, int *d_community_idx, int *d_tmp_col_community, int *d_neigh_col_idx, int *d_neigh_weights, int *d_neigh_prefix_sums) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n) {
@@ -177,8 +142,60 @@ __global__ void compute_col_comms(int n, int *d_col_idx, int *d_prefix_sums, int
             int col = d_col_idx[j];
             d_tmp_col_community[j] = d_community_idx[col];
         }
+
+        thrust::sort(thrust::seq, d_tmp_col_community + start, d_tmp_col_community + end);
+
+        thrust::pair<int*,int*> new_end;
+        new_end = thrust::reduce_by_key(thrust::seq, d_tmp_col_community + start, d_tmp_col_community + end, d_weights + start, d_neigh_col_idx + start, d_neigh_weights+start);
+        
+        int n_keys = new_end.first - (d_neigh_col_idx + start);
+        d_neigh_prefix_sums[i] = n_keys;
     }
 }
+
+__global__ void cum_sum(int size, int *d_array) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(i == 0) {
+        for(int x = 1; x < size; x++) {
+            d_array[x] = d_array[x] + d_array[x-1];
+        }
+    }
+}
+
+// __global__ void printer_debug(int n, int m, int *d_neigh_col_idx, int *d_neigh_weights, int *d_neigh_prefix_sums) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+//     if(i == 0) {
+//         printf("==== d_neigh_col_idx:\n");
+//         for(int x = 0; x < m; x++) {
+//             printf("%d ", d_neigh_col_idx[x]);
+//         }
+//         printf("\n");
+        
+//         printf("==== d_neigh_weights:\n");
+//         for(int x = 0; x < m; x++) {
+//             printf("%d ", d_neigh_weights[x]);
+//         }
+//         printf("\n");
+
+//         printf("==== d_neigh_prefix_sums:\n");
+//         for(int x = 0; x < n; x++) {
+//             printf("%d ", d_neigh_prefix_sums[x]);
+//         }
+//         printf("\n");
+
+//     }
+// }
+
+struct is_filled
+{
+    __host__ __device__
+    bool operator()(const int x)
+    {
+        return x == -1;
+    }
+};
 
 
 // -----------------------------------------------
@@ -216,6 +233,11 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
 
     int *d_tmp_col_community;
 
+    // neighboring communities
+    int *d_neigh_col_idx;
+    int *d_neigh_weights;
+    int *d_neigh_prefix_sums;
+
     // allocate GPU memory  
     err = cudaMalloc((void **)&d_col_idx, m_edges*sizeof(int));
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_col_idx: %s\n", cudaGetErrorString( err ));
@@ -246,6 +268,14 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     err = cudaMalloc((void **)&d_tmp_col_community, m_edges*sizeof(int));
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_col_community: %s\n", cudaGetErrorString( err ));
 
+    // neighboring communities
+    err = cudaMalloc((void **)&d_neigh_col_idx, m_edges*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_neigh_col_idx: %s\n", cudaGetErrorString( err ));
+    err = cudaMalloc((void **)&d_neigh_weights, m_edges*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_neigh_weights: %s\n", cudaGetErrorString( err ));
+    err = cudaMalloc((void **)&d_neigh_prefix_sums, n*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_neigh_prefix_sums: %s\n", cudaGetErrorString( err ));
+
     // copy data to GPU
     err = cudaMemcpy(d_col_idx, col_idx, m_edges*sizeof(int), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device col_idx: %s\n", cudaGetErrorString( err ));
@@ -269,23 +299,30 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     
     err = cudaMemset(d_tmp_col_community, 0, m_edges*sizeof(int));
     if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_tmp_col_community: %s\n", cudaGetErrorString( err ));
-    
+
+    err = cudaMemset(d_neigh_prefix_sums, 0, n*sizeof(int));
+    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_neigh_prefix_sums: %s\n", cudaGetErrorString( err ));
+
     float phase_modularity = 0;
     while(true) {
     
-        compute_col_comms<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_community_idx, d_tmp_col_community);
+        // neighboring communities
+        err = cudaMemset(d_neigh_col_idx, -1, m_edges*sizeof(int));
+        if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_neigh_col_idx: %s\n", cudaGetErrorString( err ));
+        err = cudaMemset(d_neigh_weights, -1, m_edges*sizeof(int));
+        if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_neigh_weights: %s\n", cudaGetErrorString( err ));
 
-        for(int i = 0; i < n; i++) {
-            int start = 0;
-            if (i>0) {
-                start = prefix_sums[i-1];
-            }
-            int end = prefix_sums[i];
-            thrust::sort(thrust::device, d_tmp_col_community + start, d_tmp_col_community + end);
-        }
-    
+        compute_col_comms<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_weights, d_community_idx, d_tmp_col_community, d_neigh_col_idx, d_neigh_weights, d_neigh_prefix_sums);
+        
+        thrust::remove_if(thrust::device, d_neigh_col_idx, d_neigh_col_idx + m_edges, is_filled());
+        thrust::remove_if(thrust::device, d_neigh_weights, d_neigh_weights + m_edges, is_filled());
+        //cumulative sum
+        cum_sum<<<grid, threads>>>(n, d_neigh_prefix_sums);
+        
+        // printer_debug<<<grid, threads>>>(n, m_tot, d_neigh_col_idx, d_neigh_weights, d_neigh_prefix_sums);
+
         // 1. Calculate best moves
-        move_nodes<<<grid, threads>>>(n, m_tot, d_col_idx, d_weights, d_prefix_sums, d_degrees, d_community_idx, d_community_degrees, d_tmp_community_idx, d_tmp_community_degrees, resolution);
+        move_nodes<<<grid, threads>>>(n, m_tot, d_neigh_col_idx, d_neigh_prefix_sums, d_neigh_weights, d_degrees, d_community_idx, d_community_degrees, d_tmp_community_idx, d_tmp_community_degrees, resolution);
 
         // 2. Calculate internal edges
         // todo: efficient way of creating 0 array every iteration
