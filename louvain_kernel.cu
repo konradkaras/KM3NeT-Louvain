@@ -264,7 +264,7 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
         thrust::device_ptr<float> mod_ptr = thrust::device_pointer_cast(d_part_mod);
         float current_modularity = thrust::reduce(mod_ptr, mod_ptr + n);
 
-        printf("RESOLUTION: %.1f | MODULARITY: %.6f\n", resolution, current_modularity);
+        // printf("RESOLUTION: %.1f | MODULARITY: %.6f\n", resolution, current_modularity);
 
         if((current_modularity - phase_modularity)/phase_modularity <= threshold) {
             break;
