@@ -1,4 +1,5 @@
 // #define DEBUG_MODE 1
+#define DEBUG_NODE 3
 
 #include <stdio.h>
 #include <algorithm>
@@ -9,7 +10,7 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_malloc_allocator.h>
 
-__global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights, int *d_prefix_sums, int *d_degrees, int *d_community_idx, int *d_community_degrees, int *d_tmp_community_idx, int *d_tmp_community_degrees, float resolution) {
+__global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_community_sizes, int *d_tmp_community_idx, int *d_tmp_community_sizes, float *d_part_mod, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
@@ -21,13 +22,25 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
         }
         int end = d_prefix_sums[i];
 
-        int deg_i = d_degrees[i];
-
         //modularity
         int current_comm = d_community_idx[i];
-        int new_comm = current_comm;
+        int new_comm = d_community_idx[i];
+        // int n_i = d_community_sizes[current_comm];
+        int n_i = 1;
+
+        bool local_set = false;
         float local_q = 0;
         float max_q = 0;
+
+        #ifdef DEBUG_MODE
+        if(i == DEBUG_NODE) {
+            printf("....\n");
+            printf("========================\n");
+            printf("NODE: %d ,COMM: %d \n", i, current_comm);
+            printf("START: %d ,END: %d \n", start, end);
+            printf("-----------------\n");
+        }
+        #endif
 
         //iterate over neighbours of i 
         for(int j = start; j < end; j++) {
@@ -37,22 +50,21 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
             //get community of neighbour
             int col_comm = d_community_idx[col];
 
-            int k_comm = d_community_degrees[col_comm];     //degree of community
+            int n_comm = d_community_sizes[col_comm];
 
             // The singlet minimum HEURISTIC
-            if(i == current_comm && deg_i == d_community_degrees[current_comm] && col == col_comm && d_degrees[col] == k_comm && col_comm > current_comm) {
-                #ifdef DEBUG_MODE
-                if(i == 0) {
-                    printf("$$$");
-                    printf("SKIP CHANGE %d to %d \n", i, col);
-                    printf("$$$");
-                }
-                #endif
+            // if(i == current_comm && d_community_sizes[current_comm] == 1 && col == col_comm && n_comm == 1 && col_comm > current_comm) {
+            //     #ifdef DEBUG_MODE
+            //     if(i == DEBUG_NODE) {
+            //         printf("$$$");
+            //         printf("SKIP CHANGE %d to %d \n", i, col);
+            //         printf("$$$");
+            //     }
+            //     #endif
 
-                continue;
-            }
+            //     continue;
+            // }
 
-            // int k_i_comm = col_weights[j];   //sum of weights of edges joining i with community
             int k_i_comm = 0;   //sum of weights of edges joining i with community
             //search for other neighbors from this community
             for(int n = start; n < end; n++) {
@@ -62,38 +74,43 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
                     continue;
                 }
 
-                // k_i_comm += d_weights[n];
                 k_i_comm++;
             }
 
-            local_q = (1.0 / (float)m_tot) * ((float)k_i_comm - (resolution * (float)deg_i * (float)k_comm / (2.0 * (float)m_tot)));
+            // Previous:
+            // local_q = (1.0 / (float)m_tot) * ((float)k_i_comm - (resolution * (float)deg_i * (float)k_comm / (2.0 * (float)m_tot)));
+
+            // Changed:
+            local_q = - ( 2*k_i_comm - (2 * n_i * resolution * n_comm) );
 
             #ifdef DEBUG_MODE
-            if(i == 0) {
-                printf("=============== \n");
-                printf("migrate %d to %d \n", i, col_comm);
-                printf("m_tot = %d \n", m_tot);
+            if(i == DEBUG_NODE) {
+                printf("test %d to %d \n", i, col_comm);
+                printf("n_i = %d \n", n_i);
                 // printf("comm_inter_deg = %d \n", comm_inter_deg);
                 printf("k_i_comm = %d \n", k_i_comm);
-                printf("deg_i = %d \n", deg_i);
-                printf("k_comm = %d \n", k_comm);
+                // printf("deg_i = %d \n", deg_i);
+                printf("n_comm = %d \n", n_comm);
                 printf("local_q = %f \n", local_q);
+                printf("------------------ \n");
             }
             #endif
 
-            if(local_q >= max_q) {
-                if(local_q == max_q && new_comm < col_comm) {
+            if(!local_set || local_q <= max_q) {
+                if(local_set && local_q == max_q && new_comm < col_comm) {
                     //do nothing
                 } else {
                     #ifdef DEBUG_MODE
-                    if(i ==0) {
-                        printf("$$$$$ \n");
+                    if(i == DEBUG_NODE) {
+                        printf("######################\n");
                         printf("migrated [%d] from %d to %d \n", i, new_comm, col_comm);
                         printf("previous q: %f , current q: %f \n", max_q, local_q);
-                        printf("$$$$$ \n");
+                        printf("######################\n");
+                        printf("------------------ \n");
                     }
                     #endif
 
+                    local_set = true;
                     new_comm = col_comm;
                     max_q = local_q;
                 }
@@ -101,12 +118,13 @@ __global__ void move_nodes(int n_tot, int m_tot, int *d_col_idx, int *d_weights,
         }
 
         d_tmp_community_idx[i] = new_comm;   
-        atomicSub(&d_tmp_community_degrees[current_comm], deg_i); 
-        atomicAdd(&d_tmp_community_degrees[new_comm], deg_i); 
+        // d_part_mod[i] = local_q;
+        atomicAdd(&d_tmp_community_sizes[new_comm], 1); 
+        atomicSub(&d_tmp_community_sizes[current_comm], 1); 
     }
 }
 
-__global__ void calculate_community_internal_edges(int n_tot, int *d_col_idx, int *d_weights, int *d_prefix_sums, int *d_tmp_community_idx, int *d_tmp_community_inter) {
+__global__ void calculate_community_internal_edges(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d_tmp_community_idx, int *d_tmp_community_inter) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
@@ -124,7 +142,6 @@ __global__ void calculate_community_internal_edges(int n_tot, int *d_col_idx, in
         for (int j = start; j < end; j++) {
             int col = d_col_idx[j];
             if (d_tmp_community_idx[col] == current_comm) {
-                // inter_count += d_weights[j];
                 inter_count++;
             }
         }
@@ -149,14 +166,15 @@ __global__ void calculate_community_internal_sum(int n_tot, int *d_tmp_community
     }
 }
 
-__global__ void calculate_part_modularity(int n_tot, int m_tot, int *d_tmp_community_inter_sum, int *d_tmp_community_degrees, float *d_part_mod, float resolution) {
+__global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter_sum, int *d_tmp_community_sizes, float *d_part_mod, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
-        float lc = (float)d_tmp_community_inter_sum[i];
-        float kc = (float)d_tmp_community_degrees[i];
-        float m = (float)m_tot;
-        d_part_mod[i] = ( ( lc/m ) - (resolution * pow((kc)/(2*m), 2.0f)) );
+        float ec = (float)d_tmp_community_inter_sum[i];
+        float nc = (float)d_tmp_community_sizes[i];
+        // d_part_mod[i] = ( ( lc/m ) - (resolution * pow((kc)/(2*m), 2.0f)) );
+        // d_part_mod[i] = ( ( lc/m ) - (resolution) );
+        d_part_mod[i] = - ( ec - (resolution * nc * nc) );
     }
 }
 
@@ -170,124 +188,108 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     dim3 grid(nblocks, 1);
     dim3 threads(block_size, 1, 1);
 
-    cudaError_t err;
+    // cudaError_t err;
 
-    int m_tot = m_edges/2;
     int *h_community_idx = (int *) malloc(n*sizeof(int));
     std::iota(h_community_idx, h_community_idx + n, 0);
 
     // define GPU memory pointers  
     int *d_col_idx;
     int *d_prefix_sums;
-    int *d_degrees;
 
-    int *h_weights = (int *) malloc(m_edges*sizeof(int));
-    std::fill_n(h_weights, m_edges, 1);
-    int *d_weights;
+    int *h_community_sizes = (int *) malloc(n*sizeof(int));
+    std::fill_n(h_community_sizes, n, 1);
+    int *d_community_sizes;
 
     int *d_community_idx;
-    int *d_community_degrees;
 
     int *d_tmp_community_idx;
-    int *d_tmp_community_degrees;
+    int *d_tmp_community_sizes;
+
     int *d_tmp_community_inter;
     int *d_tmp_community_inter_sum;
+
     float *d_part_mod;
 
     // allocate GPU memory  
-    err = cudaMalloc((void **)&d_col_idx, m_edges*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_col_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_prefix_sums, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_prefix_sums: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_degrees, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_degrees: %s\n", cudaGetErrorString( err ));
+    cudaMalloc((void **)&d_col_idx, m_edges*sizeof(int));
+    cudaMalloc((void **)&d_prefix_sums, n*sizeof(int));
 
-    err = cudaMalloc((void **)&d_weights, m_edges*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_weights: %s\n", cudaGetErrorString( err ));
+    cudaMalloc((void **)&d_community_sizes, n*sizeof(int));
 
-    err = cudaMalloc((void **)&d_community_idx, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_community_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_community_degrees, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_community_degrees: %s\n", cudaGetErrorString( err ));
+    cudaMalloc((void **)&d_community_idx, n*sizeof(int));
     
-    err = cudaMalloc((void **)&d_tmp_community_idx, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_community_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_tmp_community_degrees, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_community_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_tmp_community_inter, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_community_inter: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_tmp_community_inter_sum, n*sizeof(int));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_tmp_community_inter_sum: %s\n", cudaGetErrorString( err ));
-    err = cudaMalloc((void **)&d_part_mod, n*sizeof(float));
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMalloc d_part_mod: %s\n", cudaGetErrorString( err ));
+    cudaMalloc((void **)&d_tmp_community_idx, n*sizeof(int));
+    cudaMalloc((void **)&d_tmp_community_sizes, n*sizeof(int));
+
+    cudaMalloc((void **)&d_tmp_community_inter, n*sizeof(int));
+    cudaMalloc((void **)&d_tmp_community_inter_sum, n*sizeof(int));
+
+    cudaMalloc((void **)&d_part_mod, n*sizeof(float));
 
     // copy data to GPU
-    err = cudaMemcpy(d_col_idx, col_idx, m_edges*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device col_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMemcpy(d_prefix_sums, prefix_sums, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device prefix_sums: %s\n", cudaGetErrorString( err ));
-    err = cudaMemcpy(d_degrees, degrees, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_degrees: %s\n", cudaGetErrorString( err ));
+    cudaMemcpy(d_col_idx, col_idx, m_edges*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_prefix_sums, prefix_sums, n*sizeof(int), cudaMemcpyHostToDevice);
 
-    err = cudaMemcpy(d_weights, h_weights, m_edges*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_weights: %s\n", cudaGetErrorString( err ));
+    cudaMemcpy(d_community_idx, h_community_idx, n*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_community_sizes, h_community_sizes, n*sizeof(int), cudaMemcpyHostToDevice);
 
-    err = cudaMemcpy(d_community_idx, h_community_idx, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device h_community_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMemcpy(d_community_degrees, degrees, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_community_degrees: %s\n", cudaGetErrorString( err ));
-
-    err = cudaMemcpy(d_tmp_community_idx, h_community_idx, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_tmp_community_idx: %s\n", cudaGetErrorString( err ));
-    err = cudaMemcpy(d_tmp_community_degrees, degrees, n*sizeof(int), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy host to device d_tmp_community_degrees: %s\n", cudaGetErrorString( err ));
+    cudaMemcpy(d_tmp_community_idx, h_community_idx, n*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tmp_community_sizes, h_community_sizes, n*sizeof(int), cudaMemcpyHostToDevice);
     
     float phase_modularity = 0;
+
+    int iterations = 0;
+    int iteration_limit = 15;
+
     while(true) {
-    
         // 1. Calculate best moves
-        move_nodes<<<grid, threads>>>(n, m_tot, d_col_idx, d_weights, d_prefix_sums, d_degrees, d_community_idx, d_community_degrees, d_tmp_community_idx, d_tmp_community_degrees, resolution);
+        move_nodes<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_community_idx, d_community_sizes, d_tmp_community_idx, d_tmp_community_sizes, d_part_mod, resolution);
 
         // 2. Calculate internal edges
-        // todo: efficient way of creating 0 array every iteration
-        err = cudaMemset(d_tmp_community_inter, 0, n*sizeof(int));
-        if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_tmp_community_inter: %s\n", cudaGetErrorString( err ));
-        err = cudaMemset(d_tmp_community_inter_sum, 0, n*sizeof(int));
-        if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_tmp_community_inter_sum: %s\n", cudaGetErrorString( err ));
-        err = cudaMemset(d_part_mod, 0, n*sizeof(float));
-        if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemset d_part_mod: %s\n", cudaGetErrorString( err ));
+        cudaMemset(d_tmp_community_inter, 0, n*sizeof(int));
+        cudaMemset(d_tmp_community_inter_sum, 0, n*sizeof(int));
+        cudaMemset(d_part_mod, 0, n*sizeof(int));
 
-        calculate_community_internal_edges<<<grid, threads>>>(n, d_col_idx, d_weights, d_prefix_sums, d_tmp_community_idx, d_tmp_community_inter);
+        calculate_community_internal_edges<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_tmp_community_idx, d_tmp_community_inter);
         calculate_community_internal_sum<<<grid, threads>>>(n, d_tmp_community_idx, d_tmp_community_inter, d_tmp_community_inter_sum);
-        calculate_part_modularity<<<grid, threads>>>(n, m_tot, d_tmp_community_inter_sum, d_tmp_community_degrees, d_part_mod, resolution);
+        calculate_part_modularity<<<grid, threads>>>(n, d_tmp_community_inter_sum, d_tmp_community_sizes, d_part_mod, resolution);
 
         thrust::device_ptr<float> mod_ptr = thrust::device_pointer_cast(d_part_mod);
         float current_modularity = thrust::reduce(mod_ptr, mod_ptr + n);
 
-        // printf("RESOLUTION: %.1f | MODULARITY: %.6f\n", resolution, current_modularity);
+        printf("RESOLUTION: %.2f | MODULARITY: %.3f\n", resolution, current_modularity);
 
-        if((current_modularity - phase_modularity)/phase_modularity <= threshold) {
+        float iter_diff = fabsf((current_modularity - phase_modularity)/phase_modularity);
+
+        if(iter_diff <= threshold || iterations > iteration_limit) {
+            printf("ITERATIONS: %d | SCORE: %.6f\n", iterations, phase_modularity);
             break;
         } else {
+            iterations++;
             phase_modularity = current_modularity;
-            err = cudaMemcpy(d_community_idx, d_tmp_community_idx, n*sizeof(int), cudaMemcpyDeviceToDevice);
-            if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy device to device d_community_idx: %s\n", cudaGetErrorString( err ));
-            err = cudaMemcpy(d_community_degrees, d_tmp_community_degrees, n*sizeof(int), cudaMemcpyDeviceToDevice);
-            if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy device to device d_community_degrees: %s\n", cudaGetErrorString( err ));
+            cudaMemcpy(d_community_idx, d_tmp_community_idx, n*sizeof(int), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(d_community_sizes, d_tmp_community_sizes, n*sizeof(int), cudaMemcpyDeviceToDevice);
         }
     }
 
 
     // copy the result to host
-    err = cudaMemcpy(h_community_idx, d_tmp_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) fprintf(stderr, "Error in cudaMemcpy device to host h_community_idx: %s\n", cudaGetErrorString( err ));
+    cudaMemcpy(h_community_idx, d_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaFree(d_col_idx);
     cudaFree(d_prefix_sums);
-    cudaFree(d_degrees);
+
     cudaFree(d_community_idx);
-    cudaFree(d_community_degrees);
+    cudaFree(d_community_sizes);
+
+    cudaFree(d_part_mod);
+
     cudaFree(d_tmp_community_idx);
+    cudaFree(d_tmp_community_sizes);
+
+    cudaFree(d_tmp_community_inter);
+    cudaFree(d_tmp_community_inter_sum);
 
     return h_community_idx;
 }
