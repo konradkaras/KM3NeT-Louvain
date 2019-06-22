@@ -10,7 +10,7 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_malloc_allocator.h>
 
-__global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_community_sizes, int *d_tmp_community_idx, int *d_tmp_community_sizes, float *d_part_mod, float resolution) {
+__global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_community_sizes, int *d_tmp_community_idx, int *d_tmp_community_sizes, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
@@ -24,8 +24,7 @@ __global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d
 
         //modularity
         int current_comm = d_community_idx[i];
-        int new_comm = d_community_idx[i];
-        // int n_i = d_community_sizes[current_comm];
+        int new_comm = current_comm;
         int n_i = 1;
 
         bool local_set = false;
@@ -77,19 +76,13 @@ __global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d
                 k_i_comm++;
             }
 
-            // Previous:
-            // local_q = (1.0 / (float)m_tot) * ((float)k_i_comm - (resolution * (float)deg_i * (float)k_comm / (2.0 * (float)m_tot)));
-
-            // Changed:
             local_q = - ( 2*k_i_comm - (2 * n_i * resolution * n_comm) );
 
             #ifdef DEBUG_MODE
             if(i == DEBUG_NODE) {
                 printf("test %d to %d \n", i, col_comm);
                 printf("n_i = %d \n", n_i);
-                // printf("comm_inter_deg = %d \n", comm_inter_deg);
                 printf("k_i_comm = %d \n", k_i_comm);
-                // printf("deg_i = %d \n", deg_i);
                 printf("n_comm = %d \n", n_comm);
                 printf("local_q = %f \n", local_q);
                 printf("------------------ \n");
@@ -118,7 +111,6 @@ __global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d
         }
 
         d_tmp_community_idx[i] = new_comm;   
-        // d_part_mod[i] = local_q;
         atomicAdd(&d_tmp_community_sizes[new_comm], 1); 
         atomicSub(&d_tmp_community_sizes[current_comm], 1); 
     }
@@ -146,34 +138,16 @@ __global__ void calculate_community_internal_edges(int n_tot, int *d_col_idx, in
             }
         }
 
-        d_tmp_community_inter[i] = inter_count;
+        atomicAdd(&d_tmp_community_inter[current_comm], inter_count);
     }
 }
 
-__global__ void calculate_community_internal_sum(int n_tot, int *d_tmp_community_idx, int *d_tmp_community_inter, int *d_tmp_community_inter_sum) {
+__global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter, int *d_tmp_community_sizes, float *d_part_mod, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
-        int comm_sum = 0;
-        for(int j = 0; j < n_tot; j++) {
-            if(d_tmp_community_idx[j] == i) {
-                comm_sum += d_tmp_community_inter[j];
-            }
-        }
-
-        // edges are bidirectional
-        d_tmp_community_inter_sum[i] = comm_sum / 2;
-    }
-}
-
-__global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter_sum, int *d_tmp_community_sizes, float *d_part_mod, float resolution) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if(i < n_tot) {
-        float ec = (float)d_tmp_community_inter_sum[i];
+        float ec = (float)d_tmp_community_inter[i] / 2;
         float nc = (float)d_tmp_community_sizes[i];
-        // d_part_mod[i] = ( ( lc/m ) - (resolution * pow((kc)/(2*m), 2.0f)) );
-        // d_part_mod[i] = ( ( lc/m ) - (resolution) );
         d_part_mod[i] = - ( ec - (resolution * nc * nc) );
     }
 }
@@ -182,6 +156,7 @@ __global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter_
 // -----------------------------------------------
 
 int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *degrees, float resolution, float threshold) {
+
 
     int block_size = 1024;                          //thread block size
     int nblocks = int(ceilf(n/(float)block_size));  //problem size divided by thread block size rounded up
@@ -207,7 +182,6 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     int *d_tmp_community_sizes;
 
     int *d_tmp_community_inter;
-    int *d_tmp_community_inter_sum;
 
     float *d_part_mod;
 
@@ -223,7 +197,6 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     cudaMalloc((void **)&d_tmp_community_sizes, n*sizeof(int));
 
     cudaMalloc((void **)&d_tmp_community_inter, n*sizeof(int));
-    cudaMalloc((void **)&d_tmp_community_inter_sum, n*sizeof(int));
 
     cudaMalloc((void **)&d_part_mod, n*sizeof(float));
 
@@ -244,16 +217,14 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
 
     while(true) {
         // 1. Calculate best moves
-        move_nodes<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_community_idx, d_community_sizes, d_tmp_community_idx, d_tmp_community_sizes, d_part_mod, resolution);
+        move_nodes<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_community_idx, d_community_sizes, d_tmp_community_idx, d_tmp_community_sizes, resolution);
 
         // 2. Calculate internal edges
         cudaMemset(d_tmp_community_inter, 0, n*sizeof(int));
-        cudaMemset(d_tmp_community_inter_sum, 0, n*sizeof(int));
         cudaMemset(d_part_mod, 0, n*sizeof(int));
 
         calculate_community_internal_edges<<<grid, threads>>>(n, d_col_idx, d_prefix_sums, d_tmp_community_idx, d_tmp_community_inter);
-        calculate_community_internal_sum<<<grid, threads>>>(n, d_tmp_community_idx, d_tmp_community_inter, d_tmp_community_inter_sum);
-        calculate_part_modularity<<<grid, threads>>>(n, d_tmp_community_inter_sum, d_tmp_community_sizes, d_part_mod, resolution);
+        calculate_part_modularity<<<grid, threads>>>(n, d_tmp_community_inter, d_tmp_community_sizes, d_part_mod, resolution);
 
         thrust::device_ptr<float> mod_ptr = thrust::device_pointer_cast(d_part_mod);
         float current_modularity = thrust::reduce(mod_ptr, mod_ptr + n);
@@ -289,7 +260,6 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     cudaFree(d_tmp_community_sizes);
 
     cudaFree(d_tmp_community_inter);
-    cudaFree(d_tmp_community_inter_sum);
 
     return h_community_idx;
 }

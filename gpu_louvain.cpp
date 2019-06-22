@@ -12,7 +12,6 @@ extern int *kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, i
 
 py::array_t<int> runLouvain(int n, py::array_t<int> col_idx, py::array_t<int> prefix_sums, py::array_t<int> degrees, float resolution, float threshold)
 {
-    cout << "Running Louvain..." << endl;
 
     auto col_idx_info = col_idx.request();
     auto prefix_sums_info = prefix_sums.request();
@@ -27,7 +26,9 @@ py::array_t<int> runLouvain(int n, py::array_t<int> col_idx, py::array_t<int> pr
     printf("n=%d\n", n);
     printf("m_edges=%d\n", m_edges);
 
+    cout << "Running Louvain..." << endl;
     int *result = kernel_wrapper(n, m_edges, ptr_col_idx, ptr_prefix_sums, ptr_degrees, resolution, threshold);
+    cout << "CUDA complete" << endl;
 
     return py::array_t<int>(n, result);
 }
