@@ -152,6 +152,36 @@ __global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter,
     }
 }
 
+#define class_slope -0.025
+#define class_const 1.0
+
+__global__ void classify_communities(int n_tot, int *d_community_inter, int *d_community_sizes, int *d_community_class) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(i < n_tot) {
+        float ec = (float)d_community_inter[i] / 2;
+        float nc = (float)d_community_sizes[i];
+        float density = ec / ((nc*(nc-1)) / 2);
+
+        float density_limit = class_slope * nc + class_const;
+
+        if (density > density_limit) {
+            d_community_class[i] = 1;
+        } else {
+            d_community_class[i] = 0;
+        }
+    }
+}
+
+__global__ void classify_hits(int n_tot, int *d_community_idx, int *d_community_class, int *d_hit_class) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if(i < n_tot) {
+        int comm_idx = d_community_idx[i];
+        d_hit_class[i] = d_community_class[comm_idx];
+    }
+}
+
 
 // -----------------------------------------------
 
@@ -168,6 +198,9 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     int *h_community_idx = (int *) malloc(n*sizeof(int));
     std::iota(h_community_idx, h_community_idx + n, 0);
 
+    int *h_hit_class = (int *) malloc(n*sizeof(int));
+    std::iota(h_hit_class, h_hit_class + n, 0);
+
     // define GPU memory pointers  
     int *d_col_idx;
     int *d_prefix_sums;
@@ -181,9 +214,12 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     int *d_tmp_community_idx;
     int *d_tmp_community_sizes;
 
+    int *d_community_inter;
     int *d_tmp_community_inter;
 
     float *d_part_mod;
+    int *d_community_class;
+    int *d_hit_class;
 
     // allocate GPU memory  
     cudaMalloc((void **)&d_col_idx, m_edges*sizeof(int));
@@ -196,9 +232,12 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     cudaMalloc((void **)&d_tmp_community_idx, n*sizeof(int));
     cudaMalloc((void **)&d_tmp_community_sizes, n*sizeof(int));
 
+    cudaMalloc((void **)&d_community_inter, n*sizeof(int));
     cudaMalloc((void **)&d_tmp_community_inter, n*sizeof(int));
 
     cudaMalloc((void **)&d_part_mod, n*sizeof(float));
+    cudaMalloc((void **)&d_community_class, n*sizeof(int));
+    cudaMalloc((void **)&d_hit_class, n*sizeof(int));
 
     // copy data to GPU
     cudaMemcpy(d_col_idx, col_idx, m_edges*sizeof(int), cudaMemcpyHostToDevice);
@@ -209,6 +248,11 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
 
     cudaMemcpy(d_tmp_community_idx, h_community_idx, n*sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_tmp_community_sizes, h_community_sizes, n*sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMemset(d_community_inter, 0, n*sizeof(int));
+    cudaMemset(d_community_class, 0, n*sizeof(int));
+    cudaMemset(d_hit_class, 0, n*sizeof(int));
+
     
     float phase_modularity = 0;
 
@@ -241,12 +285,16 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
             phase_modularity = current_modularity;
             cudaMemcpy(d_community_idx, d_tmp_community_idx, n*sizeof(int), cudaMemcpyDeviceToDevice);
             cudaMemcpy(d_community_sizes, d_tmp_community_sizes, n*sizeof(int), cudaMemcpyDeviceToDevice);
+            cudaMemcpy(d_community_inter, d_tmp_community_inter, n*sizeof(int), cudaMemcpyDeviceToDevice);
         }
     }
 
+    classify_communities<<<grid, threads>>>(n, d_community_inter, d_community_sizes, d_community_class);
+    classify_hits<<<grid, threads>>>(n, d_community_idx, d_community_class, d_hit_class);
 
     // copy the result to host
-    cudaMemcpy(h_community_idx, d_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
+    // cudaMemcpy(h_community_idx, d_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_hit_class, d_hit_class, n*sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaFree(d_col_idx);
     cudaFree(d_prefix_sums);
@@ -261,5 +309,5 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
 
     cudaFree(d_tmp_community_inter);
 
-    return h_community_idx;
+    return h_hit_class;
 }
