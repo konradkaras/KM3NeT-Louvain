@@ -36,7 +36,7 @@ struct KernelWrapper
         return py::array_t<int>(n, hit_classes);
     }
 
-    void run(int n, py::array_t<int> col_idx, py::array_t<int> prefix_sums, py::array_t<int> degrees, float resolution, float threshold);
+    void run(int n, py::array_t<int> col_idx, py::array_t<int> prefix_sums, py::array_t<int> degrees, float resolution, float threshold, float class_dens_limit, float class_size_limit);
 
     int n;
     int *community_idx;

@@ -171,11 +171,11 @@ __global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter,
 // #define class_size_limit 10.0
 // #define class_dens_limit 0.25
 
-#define class_size_limit 29.0
-#define class_dens_limit 0.0
+// #define class_size_limit 29.0
+// #define class_dens_limit 0.0
 
 
-__global__ void classify_communities(int n_tot, int *d_community_inter, int *d_community_sizes, int *d_community_class) {
+__global__ void classify_communities(int n_tot, int *d_community_inter, int *d_community_sizes, int *d_community_class, float class_dens_limit, float class_size_limit) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
@@ -220,7 +220,7 @@ __global__ void classify_hits(int n_tot, int *d_community_idx, int *d_community_
 
 // -----------------------------------------------
 
-int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *degrees, float resolution, float threshold, ResponseWrapper *wrapper) {
+int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *degrees, float resolution, float threshold, ResponseWrapper *wrapper, float class_dens_limit, float class_size_limit) {
 
 
     int block_size = 1024;                          //thread block size
@@ -327,7 +327,7 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
         }
     }
 
-    classify_communities<<<grid, threads>>>(n, d_community_inter, d_community_sizes, d_community_class);
+    classify_communities<<<grid, threads>>>(n, d_community_inter, d_community_sizes, d_community_class, class_dens_limit, class_size_limit);
     classify_hits<<<grid, threads>>>(n, d_community_idx, d_community_class, d_hit_class);
 
     // copy the result to host
