@@ -10,6 +10,8 @@
 #include <thrust/device_ptr.h>
 #include <thrust/device_malloc_allocator.h>
 
+#include "ResponseWrapper.h"
+
 __global__ void move_nodes(int n_tot, int *d_col_idx, int *d_prefix_sums, int *d_community_idx, int *d_community_sizes, int *d_tmp_community_idx, int *d_tmp_community_sizes, float resolution) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -146,30 +148,63 @@ __global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter,
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
-        float ec = (float)d_tmp_community_inter[i] / 2;
-        float nc = (float)d_tmp_community_sizes[i];
+        float ec = (float) (d_tmp_community_inter[i] / 2.0);
+        float nc = (float) (d_tmp_community_sizes[i]);
         d_part_mod[i] = - ( ec - (resolution * nc * nc) );
     }
 }
 
-#define class_slope -0.025
+// LINEAR
+#define class_slope -0.015
 #define class_const 1.0
+
+//LOG
+#define class_log_slope -0.333
+#define class_log_const 1.583
+
+// EXPOTENTIAL
+#define class_exp_a 1.6
+#define class_exp_b 0.92
+#define class_exp_c 0.2
+#define class_exp_xs 4.6
+
+// #define class_size_limit 10.0
+// #define class_dens_limit 0.25
+
+#define class_size_limit 29.0
+#define class_dens_limit 0.0
+
 
 __global__ void classify_communities(int n_tot, int *d_community_inter, int *d_community_sizes, int *d_community_class) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(i < n_tot) {
-        float ec = (float)d_community_inter[i] / 2;
-        float nc = (float)d_community_sizes[i];
-        float density = ec / ((nc*(nc-1)) / 2);
-
-        float density_limit = class_slope * nc + class_const;
-
-        if (density > density_limit) {
-            d_community_class[i] = 1;
-        } else {
-            d_community_class[i] = 0;
+        float ec = (float) (d_community_inter[i] / 2.0);
+        float nc = (float) (d_community_sizes[i]);
+        float density = ec / ((nc*(nc-1.0)) / 2.0);
+        if (isnan(density)) {
+            density = 0.0;
         }
+
+        // LINEAR
+        // float density_limit = class_slope * nc + class_const;
+
+        // LOG
+        // float density_limit = class_log_slope * logf(nc) + class_log_const;
+        // if(density_limit < class_dens_limit) {
+        //     density_limit = class_dens_limit;
+        // }
+
+        // EXPOTENTIAL
+        // float density_limit = ( class_exp_a * ( pow(class_exp_b, (nc + class_exp_xs)) ) ) + class_exp_c;
+
+        int comm_class = 0;
+        if (nc > class_size_limit && density > class_dens_limit) {
+            comm_class = 1;
+        }
+        d_community_class[i] = comm_class;
+
+        // printf("Community: %d \t ec: %g \t nc: %g \t density: %f \t class: %d \n", i, ec, nc, density, comm_class);
     }
 }
 
@@ -185,7 +220,7 @@ __global__ void classify_hits(int n_tot, int *d_community_idx, int *d_community_
 
 // -----------------------------------------------
 
-int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *degrees, float resolution, float threshold) {
+int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *degrees, float resolution, float threshold, ResponseWrapper *wrapper) {
 
 
     int block_size = 1024;                          //thread block size
@@ -197,6 +232,9 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
 
     int *h_community_idx = (int *) malloc(n*sizeof(int));
     std::iota(h_community_idx, h_community_idx + n, 0);
+
+    int *h_community_inter = (int *) malloc(n*sizeof(int));
+    std::iota(h_community_inter, h_community_inter + n, 0);
 
     int *h_hit_class = (int *) malloc(n*sizeof(int));
     std::iota(h_hit_class, h_hit_class + n, 0);
@@ -273,12 +311,12 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
         thrust::device_ptr<float> mod_ptr = thrust::device_pointer_cast(d_part_mod);
         float current_modularity = thrust::reduce(mod_ptr, mod_ptr + n);
 
-        printf("RESOLUTION: %.2f | MODULARITY: %.3f\n", resolution, current_modularity);
+        // printf("RESOLUTION: %.2f | MODULARITY: %.3f\n", resolution, current_modularity);
 
         float iter_diff = fabsf((current_modularity - phase_modularity)/phase_modularity);
 
         if(iter_diff <= threshold || iterations > iteration_limit) {
-            printf("ITERATIONS: %d | SCORE: %.6f\n", iterations, phase_modularity);
+            // printf("ITERATIONS: %d | SCORE: %.6f\n", iterations, phase_modularity);
             break;
         } else {
             iterations++;
@@ -293,7 +331,9 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     classify_hits<<<grid, threads>>>(n, d_community_idx, d_community_class, d_hit_class);
 
     // copy the result to host
-    // cudaMemcpy(h_community_idx, d_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_community_idx, d_community_idx, n*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_community_inter, d_community_inter, n*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_community_sizes, d_community_sizes, n*sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_hit_class, d_hit_class, n*sizeof(int), cudaMemcpyDeviceToHost);
 
     cudaFree(d_col_idx);
@@ -308,6 +348,15 @@ int * kernel_wrapper(int n, int m_edges, int *col_idx, int *prefix_sums, int *de
     cudaFree(d_tmp_community_sizes);
 
     cudaFree(d_tmp_community_inter);
+
+    cudaFree(d_community_inter);
+    cudaFree(d_community_class);
+    cudaFree(d_hit_class);
+
+    wrapper->community_idx = h_community_idx;
+    wrapper->community_sizes = h_community_sizes;
+    wrapper->community_inter = h_community_inter;
+    wrapper->hit_classes = h_hit_class;
 
     return h_hit_class;
 }

@@ -10,6 +10,6 @@ include_directories(
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
-cuda_add_library(gpu_louvain SHARED  gpu_louvain.cpp louvain_kernel.cu)
+cuda_add_library(gpu_louvain SHARED  gpu_louvain.cpp louvain_kernel.cu KernelWrapper.cpp)
 target_link_libraries(gpu_louvain ${PYTHON_LIBRARIES} ${CUDA_LIBRARIES})
 set_target_properties(gpu_louvain PROPERTIES PREFIX "")
