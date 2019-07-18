@@ -171,8 +171,8 @@ __global__ void calculate_part_modularity(int n_tot, int *d_tmp_community_inter,
 // #define class_size_limit 10.0
 // #define class_dens_limit 0.25
 
-#define class_size_limit 29.0
-#define class_dens_limit 0.0
+#define class_size_limit 20.0
+#define class_dens_limit 0.4
 
 
 __global__ void classify_communities(int n_tot, int *d_community_inter, int *d_community_sizes, int *d_community_class) {
